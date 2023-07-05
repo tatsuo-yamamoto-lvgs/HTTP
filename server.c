@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define SIZE (5*1024)
 
@@ -16,6 +17,25 @@ int createResponseMessage(char*, int, char*, char*, unsigned int);
 int sendResponseMessage(int, char*, unsigned int);
 unsigned int getFileSize(const char*);
 void setHeaderFiled(char*,char*,unsigned int);
+void *handle_request(void*);
+
+typedef struct {
+    int c_sock;
+    char *root_path;
+} thread_args;
+
+void *handle_request(void *arg) {
+    thread_args *args = (thread_args *) arg;
+
+    /* 接続済のソケットでデータのやり取り */
+    httpServer(args->c_sock, args->root_path);
+
+    /* ソケット通信をクローズ */
+    close(args->c_sock);
+    free(arg);
+
+    pthread_exit(NULL);
+}
 
 /* ファイルサイズを取得する */
 unsigned int getFileSize(const char *path) {
@@ -357,13 +377,11 @@ int main(int argc, char *argv[]) {
         }
         printf("Connected!!\n");
 
-        /* 接続済のソケットでデータのやり取り */
-        httpServer(c_sock,root_path);
-
-        /* ソケット通信をクローズ */
-        close(c_sock);
-
-        /* 次の接続要求の受け付けに移る */
+        pthread_t thread;
+        thread_args *args = malloc(sizeof(thread_args));
+        args->c_sock = c_sock;
+        args->root_path = root_path;
+        pthread_create(&thread, NULL, handle_request, (void *)args);
     }
 
     /* 接続待ちソケットをクローズ */
