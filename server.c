@@ -13,7 +13,8 @@ int httpServer(int, char*);
 int recvRequestMessage(int, char*, unsigned int);
 int parseRequestMessage(char*, char*, char*, char*);
 int getProcessing(char*, char*);
-int createResponseMessage(char*, int, char*, char*, unsigned int);
+void savePostData(char*, char*);
+int createResponseMessage(char*, int, char*, char*, unsigned int, char*);
 int sendResponseMessage(int, char*, unsigned int);
 unsigned int getFileSize(const char*);
 void setHeaderFiled(char*,char*,unsigned int);
@@ -87,9 +88,11 @@ int parseRequestMessage(char *method, char *target, char *request_message, char 
     char *line;
     char *tmp_method;
     char *tmp_target;
+    char tmp_request_message[SIZE];
     
     /* リクエストメッセージの１行目のみ取得 */
-    line = strtok(request_message, "\n");
+    strcpy(tmp_request_message, request_message);
+    line = strtok(tmp_request_message, "\n");
 
     /* " "までの文字列を取得しmethodにコピー */
     tmp_method = strtok(line, " ");
@@ -113,7 +116,7 @@ int parseRequestMessage(char *method, char *target, char *request_message, char 
         strcpy(target, root_path);
         strcat(target,tmp_target);
     }
-    printf("target;%s-----------------------------------------\n",target);
+
     return 0;
 }
 
@@ -147,6 +150,28 @@ int getProcessing(char *body, char *file_path) {
     }
 }
 
+/* POST通信で送られてきたデータを保存する */
+void savePostData(char *filename, char *request_message){
+    char boundary[SIZE];
+    char request_body[SIZE];
+    char *boundary_pos = strstr(request_message, "Content-Type: multipart/form-data; boundary=");
+    if (boundary_pos) {
+        char *boundary_value = boundary_pos + strlen("Content-Type: multipart/form-data; boundary=");
+        sscanf(boundary_value, "%s", boundary);
+    } else {
+        printf("Cannot find boundary.\n");
+    }
+
+    FILE *file = fopen(filename, "w");
+    char *start_boundary_pos = strstr(strstr(request_message, boundary) + strlen(boundary), boundary);
+    char *end_boundary_pos = strstr(start_boundary_pos + strlen(boundary), boundary);
+    size_t message_length = end_boundary_pos - start_boundary_pos - strlen(boundary) - 4;
+    strncpy(request_body, start_boundary_pos + strlen(boundary) + 2, message_length); 
+    request_body[message_length] = '\0';
+    fputs(request_body, file);
+    fclose(file);
+}
+
 /*
  * レスポンスメッセージを作成する
  * response_message：レスポンスメッセージを格納するバッファへのアドレス
@@ -156,7 +181,7 @@ int getProcessing(char *body, char *file_path) {
  * body_size：ボディのサイズ
  * 戻り値：レスポンスメッセージのデータサイズ（バイト長）
  */
-int createResponseMessage(char *response_message, int status, char *header, char *body, unsigned int body_size) {
+int createResponseMessage(char *response_message, int status, char *header, char *body, unsigned int body_size, char *method) {
 
     unsigned int no_body_len;
     unsigned int body_len;
@@ -168,10 +193,13 @@ int createResponseMessage(char *response_message, int status, char *header, char
         sprintf(response_message, "HTTP/1.1 200 OK\r\n%s\r\n", header);
 
         no_body_len = strlen(response_message);
-        body_len = body_size;
-
-        /* ヘッダーフィールドの後ろにボディをコピー */
-        memcpy(&response_message[no_body_len], body, body_len);
+        if(strcmp(method, "HEAD") == 0){
+            body_len = 0;
+        } else if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0){
+            body_len = body_size;
+            /* ヘッダーフィールドの後ろにボディをコピー */
+            memcpy(&response_message[no_body_len], body, body_len);
+        }
     } else if (status == 404) {
         /* レスポンス行とヘッダーフィールドの文字列を作成 */
         sprintf(response_message, "HTTP/1.1 404 Not Found\r\n%s\r\n", header);
@@ -233,6 +261,8 @@ void setHeaderFiled(char *header_field, char *target, unsigned int file_size){
         sprintf(header_field, "Content-Type: text/css\r\n");
     }else if(strstr(target,"javascript") != NULL){
         sprintf(header_field, "Content-Type: text/javascript\r\n");
+    }else if(strstr(target,"png") != NULL){
+        sprintf(header_field, "Content-Type: image/png\r\n");
     }else{
         sprintf(header_field, "Content-Type: image/jpeg\r\n");
     }
@@ -252,6 +282,7 @@ int httpServer(int sock, char *root_path) {
     char response_message[SIZE];
     char method[SIZE];
     char target[SIZE];
+    char request_body[SIZE];
     char header_field[SIZE];
     char body[SIZE];
     int status;
@@ -280,18 +311,16 @@ int httpServer(int sock, char *root_path) {
             printf("parseRequestMessage error\n");
             break;
         }
-
-        /* メソッドがGET以外はステータスコードを404にする */
-        if (strcmp(method, "GET") == 0) {
-            // if (strcmp(target, "/") == 0) {
-            //     /* /が指定された時は/index.htmlに置き換える */
-            //     strcpy(target, "/index.html");
-            // }
-
+        /* メソッドがGETまたはPOSTまたはHEAD以外はステータスコードを404にする */
+        if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0 || strcmp(method, "HEAD") == 0) {
             /* GETの応答をするために必要な処理を行う */
             status = getProcessing(body, &target[1]);
         } else {
             status = 404;
+        }
+        /* POST通信時の受信ファイルを保存*/
+        if (strcmp(method, "POST") == 0) {
+            savePostData("upfile.html", request_message);
         }
 
         /* ヘッダーフィールド作成*/
@@ -299,7 +328,7 @@ int httpServer(int sock, char *root_path) {
         setHeaderFiled(header_field, target, file_size);
 
         /* レスポンスメッセージを作成 */
-        response_size = createResponseMessage(response_message, status, header_field, body, file_size);
+        response_size = createResponseMessage(response_message, status, header_field, body, file_size, method);
         if (response_size == -1) {
             printf("createResponseMessage error\n");
             break;
