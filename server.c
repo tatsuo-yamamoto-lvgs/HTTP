@@ -13,7 +13,7 @@ int httpServer(int, char*);
 int recvRequestMessage(int, char*, unsigned int);
 int parseRequestMessage(char*, char*, char*, char*);
 int getProcessing(char*, char*);
-void savePostData(char*, char*);
+void savePostData(char*);
 int createResponseMessage(char*, int, char*, char*, unsigned int, char*);
 int sendResponseMessage(int, char*, unsigned int);
 unsigned int getFileSize(const char*);
@@ -151,9 +151,12 @@ int getProcessing(char *body, char *file_path) {
 }
 
 /* POST通信で送られてきたデータを保存する */
-void savePostData(char *filename, char *request_message){
+void savePostData(char *request_message){
     char boundary[SIZE];
+    char *request_file_name[SIZE];
+    char *delimiter = "\r\n\r\n";
     char request_body[SIZE];
+    char file_name[SIZE];
     char *boundary_pos = strstr(request_message, "Content-Type: multipart/form-data; boundary=");
     if (boundary_pos) {
         char *boundary_value = boundary_pos + strlen("Content-Type: multipart/form-data; boundary=");
@@ -162,14 +165,31 @@ void savePostData(char *filename, char *request_message){
         printf("Cannot find boundary.\n");
     }
 
-    FILE *file = fopen(filename, "w");
     char *start_boundary_pos = strstr(strstr(request_message, boundary) + strlen(boundary), boundary);
     char *end_boundary_pos = strstr(start_boundary_pos + strlen(boundary), boundary);
-    size_t message_length = end_boundary_pos - start_boundary_pos - strlen(boundary) - 4;
-    strncpy(request_body, start_boundary_pos + strlen(boundary) + 2, message_length); 
-    request_body[message_length] = '\0';
-    fputs(request_body, file);
-    fclose(file);
+    char *request_file_name_pos = strstr(start_boundary_pos + strlen(boundary), "filename=");
+    char *request_content_type_pos = strstr(start_boundary_pos + strlen(boundary), "Content-Type: ");
+    char *delimiter_pos = strstr(start_boundary_pos + strlen(boundary), delimiter);
+    size_t request_body_length = end_boundary_pos - delimiter_pos - strlen(delimiter) - 2;
+    size_t file_name_length = request_content_type_pos - request_file_name_pos - strlen("filename=") - 2;
+    strncpy(file_name, request_file_name_pos + strlen("filename=") + 1, file_name_length - 2); 
+    strncpy(request_body, delimiter_pos + strlen(delimiter) , request_body_length); 
+    request_body[request_body_length] = '\0';
+    /* ここにfile nameを決める関数をかく */
+    char preserve_name[SIZE];
+    if (strstr(file_name, ".html") != NULL || strstr(file_name, ".css") != NULL || strstr(file_name, ".js") != NULL){
+        strcpy(preserve_name, file_name);
+        FILE *file = fopen(preserve_name, "w");
+        fputs(request_body, file);
+        fclose(file);
+    } else if(strstr(file_name, "jpg") != NULL || strstr(file_name, "png") != NULL){
+        strcpy(preserve_name,file_name);
+        FILE *file = fopen(preserve_name, "wb");
+        fwrite(request_body, sizeof(char), request_body_length, file);
+        fclose(file);
+    } else {
+        printf("post message content-type error\n");
+    }
 }
 
 /*
@@ -320,7 +340,7 @@ int httpServer(int sock, char *root_path) {
         }
         /* POST通信時の受信ファイルを保存*/
         if (strcmp(method, "POST") == 0) {
-            savePostData("upfile.html", request_message);
+            savePostData(request_message);
         }
 
         /* ヘッダーフィールド作成*/
