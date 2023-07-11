@@ -11,9 +11,9 @@
 
 int httpServer(int, char*);
 int recvRequestMessage(int, char*, unsigned int);
-int parseRequestMessage(char*, char*, char*, char*);
+int parseRequestMessage(char*, char*, char*, char*, int);
 int getProcessing(char*, char*);
-void savePostData(char*);
+void savePostData(int,char*,int);
 int createResponseMessage(char*, int, char*, char*, unsigned int, char*);
 int sendResponseMessage(int, char*, unsigned int);
 unsigned int getFileSize(const char*);
@@ -69,11 +69,19 @@ unsigned int getFileSize(const char *path) {
  */
 int recvRequestMessage(int sock, char *request_message, unsigned int buf_size) {
     int recv_size;
+    int total_recv_size = 0;
     
-    recv_size = recv(sock, request_message, buf_size, 0);
-            printf("-------------------------------------------------------\n");
+    while(1){
+        recv_size = recv(sock, request_message + total_recv_size, buf_size, 0);
+        total_recv_size += recv_size;
+        request_message[total_recv_size] = '\0';
+        if (strstr(request_message, "\r\n\r\n")){
+            break;
+        }
+    }
 
-    return recv_size;
+
+    return total_recv_size;
 }
 
 /*
@@ -83,7 +91,7 @@ int recvRequestMessage(int sock, char *request_message, unsigned int buf_size) {
  * request_message：解析するリクエストメッセージが格納されたバッファへのアドレス
  * 戻り値：成功時は0、失敗時は-1
  */
-int parseRequestMessage(char *method, char *target, char *request_message, char *root_path) {
+int parseRequestMessage(char *method, char *target, char *request_message, char *root_path, int request_size) {
 
     char *line;
     char *tmp_method;
@@ -91,7 +99,8 @@ int parseRequestMessage(char *method, char *target, char *request_message, char 
     char tmp_request_message[SIZE];
     
     /* リクエストメッセージの１行目のみ取得 */
-    strcpy(tmp_request_message, request_message);
+    memcpy(tmp_request_message, request_message, request_size);
+
     line = strtok(tmp_request_message, "\n");
 
     /* " "までの文字列を取得しmethodにコピー */
@@ -108,7 +117,6 @@ int parseRequestMessage(char *method, char *target, char *request_message, char 
         printf("get target error\n");
         return -1;
     }
-    
     if(strcmp(tmp_target, "/") == 0) {
         strcpy(target, root_path);
         strcat(target, "/index.html");
@@ -131,19 +139,15 @@ int getProcessing(char *body, char *file_path) {
     FILE *f;
     int file_size;
 
-    /* ファイルサイズを取得 */
     file_size = getFileSize(file_path);
-    if (file_size == 0) {
-        /* ファイルサイズが0やファイルが存在しない場合は404を返す */
-        printf("getFileSize error\n");
-        return 404;
-    }
-    /* ファイルを読み込んでボディとする */
     f = fopen(file_path, "rb");
-    if (strcmp(file_path, "secret.html") == 0){
+    if (access(file_path, F_OK) != 0) {
+        printf("File do not exist\n");
+        return 404;
+    } else if (access(file_path, R_OK) != 0){
         fclose(f);
         return 403;
-    }else{
+    } else {
         fread(body, 1, file_size, f);
         fclose(f);
         return 200;
@@ -151,20 +155,42 @@ int getProcessing(char *body, char *file_path) {
 }
 
 /* POST通信で送られてきたデータを保存する */
-void savePostData(char *request_message){
+void savePostData(int sock, char *request_header, int recv_size){
     char boundary[SIZE];
-    char *request_file_name[SIZE];
+    char request_file_name[SIZE];
     char *delimiter = "\r\n\r\n";
-    char request_body[SIZE];
+    char *request_message;
+    char *request_body;
     char file_name[SIZE];
-    char *boundary_pos = strstr(request_message, "Content-Type: multipart/form-data; boundary=");
+
+    /* 読み取れていないデータがある場合、request_messageにデータを追加する */
+    char *content_length_pos = strstr(request_header, "Content-Length: ");
+    char *boundary_pos = strstr(request_header, "Content-Type: multipart/form-data; boundary=");
     if (boundary_pos) {
         char *boundary_value = boundary_pos + strlen("Content-Type: multipart/form-data; boundary=");
         sscanf(boundary_value, "%s", boundary);
     } else {
         printf("Cannot find boundary.\n");
     }
+    char content_length_str[SIZE];
+    strncpy(content_length_str, content_length_pos + strlen("Content-Length: "), boundary_pos - content_length_pos -2);
+    int content_length = atoi(content_length_str);
+    char *blank_line_pos = strstr(request_header, "\r\n\r\n");
+    size_t header_length = blank_line_pos - request_header;
+    request_message = malloc(content_length + header_length + strlen("\r\n\r\n") + 1);
 
+    memcpy(request_message, request_header, recv_size);
+    int recieve_more_content_length = 0;
+    int re_recv_size;
+    while(1){
+        if (content_length + header_length + strlen("\r\n\r\n")> SIZE){
+            re_recv_size = recv(sock, request_message + recv_size + recieve_more_content_length, content_length + header_length + strlen("\r\n\r\n") - recv_size, 0);
+        }
+        recieve_more_content_length += re_recv_size;
+        if (recieve_more_content_length == content_length + header_length + strlen("\r\n\r\n") - recv_size){
+            break;
+        }
+    }
     char *start_boundary_pos = strstr(strstr(request_message, boundary) + strlen(boundary), boundary);
     char *end_boundary_pos = strstr(start_boundary_pos + strlen(boundary), boundary);
     char *request_file_name_pos = strstr(start_boundary_pos + strlen(boundary), "filename=");
@@ -173,14 +199,14 @@ void savePostData(char *request_message){
     size_t request_body_length = end_boundary_pos - delimiter_pos - strlen(delimiter) - 2;
     size_t file_name_length = request_content_type_pos - request_file_name_pos - strlen("filename=") - 2;
     strncpy(file_name, request_file_name_pos + strlen("filename=") + 1, file_name_length - 2); 
-    strncpy(request_body, delimiter_pos + strlen(delimiter) , request_body_length); 
-    request_body[request_body_length] = '\0';
+    file_name[file_name_length - 2] = '\0';
+    request_body = delimiter_pos + strlen(delimiter);
     /* ここにfile nameを決める関数をかく */
     char preserve_name[SIZE];
     if (strstr(file_name, ".html") != NULL || strstr(file_name, ".css") != NULL || strstr(file_name, ".js") != NULL){
         strcpy(preserve_name, file_name);
         FILE *file = fopen(preserve_name, "w");
-        fputs(request_body, file);
+        fwrite(request_body, sizeof(char), request_body_length, file);
         fclose(file);
     } else if(strstr(file_name, "jpg") != NULL || strstr(file_name, "png") != NULL){
         strcpy(preserve_name,file_name);
@@ -190,6 +216,8 @@ void savePostData(char *request_message){
     } else {
         printf("post message content-type error\n");
     }
+
+    free(request_message);
 }
 
 /*
@@ -324,23 +352,25 @@ int httpServer(int sock, char *root_path) {
         }
 
         /* 受信した文字列を表示 */
-        showMessage(request_message, request_size);
-
+        // showMessage(request_message, request_size);
+        
         /* 受信した文字列を解析してメソッドやリクエストターゲットを取得 */
-        if (parseRequestMessage(method, target, request_message, root_path) == -1) {
+        if (parseRequestMessage(method, target, request_message, root_path, request_size) == -1) {
             printf("parseRequestMessage error\n");
             break;
         }
+        
         /* メソッドがGETまたはPOSTまたはHEAD以外はステータスコードを404にする */
         if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0 || strcmp(method, "HEAD") == 0) {
             /* GETの応答をするために必要な処理を行う */
             status = getProcessing(body, &target[1]);
         } else {
-            status = 404;
+            status = 405;
         }
+        
         /* POST通信時の受信ファイルを保存*/
         if (strcmp(method, "POST") == 0) {
-            savePostData(request_message);
+            savePostData(sock, request_message, request_size);
         }
 
         /* ヘッダーフィールド作成*/
@@ -355,7 +385,7 @@ int httpServer(int sock, char *root_path) {
         }
 
         /* 送信するメッセージを表示 */
-        showMessage(response_message, response_size);
+        // showMessage(response_message, response_size);
 
         /* レスポンスメッセージを送信する */
         sendResponseMessage(sock, response_message, response_size);
