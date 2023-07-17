@@ -12,18 +12,42 @@
 int httpServer(int, char*);
 int recvRequestMessage(int, char*, unsigned int);
 int parseRequestMessage(char**, char**, char*, char*, int);
-int getProcessing(char**, char*);
+int getStatus(char**, char* ,char**);
 void savePostData(int,char*,int);
 int createResponseMessage(char**, int, char*, char*, unsigned int, char*);
 int sendResponseMessage(int, char*, unsigned int);
 unsigned int getFileSize(const char*);
-void setHeaderFiled(char**,char*,unsigned int);
+void setHeaderFiled(char**,char*,unsigned int, int, char**);
 void *handle_request(void*);
 
 typedef struct {
     int c_sock;
     char *root_path;
 } thread_args;
+
+typedef struct {
+    char file[256];
+    char url[256];
+    char type[5];
+} RedirectEntry;
+RedirectEntry* entries; 
+
+RedirectEntry* parseRedirectConfig(const char* path) {
+    FILE* file = fopen(path, "r");
+    if (file == NULL) {
+        perror("Failed to open the file");
+        exit(1);
+    }
+
+    RedirectEntry* entries = malloc(sizeof(RedirectEntry) * 100); // Assume max 100 entries
+    int i = 0;
+
+    while (fscanf(file, "%s %s %s\n", entries[i].file, entries[i].url, entries[i].type) != EOF) {
+        i++;
+    }
+    fclose(file);
+    return entries;
+}
 
 void *handle_request(void *arg) {
     thread_args *args = (thread_args *) arg;
@@ -80,7 +104,6 @@ int recvRequestMessage(int sock, char *request_message, unsigned int buf_size) {
         }
     }
 
-
     return total_recv_size;
 }
 
@@ -110,6 +133,9 @@ int parseRequestMessage(char **method, char **target, char *request_message, cha
         return -1;
     }
     *method = malloc(strlen(tmp_method));
+    if (method == NULL){
+        printf("memory allocate error for method");
+    }
     strcpy(*method, tmp_method);
 
     /* 次の" "までの文字列を取得しtargetにコピー */
@@ -122,9 +148,11 @@ int parseRequestMessage(char **method, char **target, char *request_message, cha
         strcpy(tmp_target, "/index.html");
     }
     *target = malloc(strlen(root_path)+strlen(tmp_target));
+    if (target == NULL){
+        printf("memory allocate error for target");
+    }
     strcpy(*target, root_path);
     strcat(*target,tmp_target);
-    printf("--------------------target:%s\n",*target);
 
     return 0;
 }
@@ -135,13 +163,26 @@ int parseRequestMessage(char **method, char **target, char *request_message, cha
  * file_path：リクエストターゲットに対応するファイルへのパス
  * 戻り値：ステータスコード（ファイルがない場合は404）
  */
-int getProcessing(char **body, char *file_path) {
+int getStatus(char **response_body, char *file_path, char **location) {
 
     FILE *f;
     int file_size;
+    int i = 0;
+    while (strcmp(entries[i].file, "") != 0) { // Assume last entry has an empty file field
+        if (strcmp(entries[i].file, file_path) == 0) {
+            *location = strdup(entries[i].url);
+            file_size = 0;
+            *response_body = malloc(file_size);
+            return strcmp(entries[i].type, "PERM") == 0 ? 301 : 302;
+        }
+        i++;
+    }
 
     file_size = getFileSize(file_path);
-    *body = malloc(file_size);
+    *response_body = malloc(file_size);
+    if (response_body == NULL){
+        printf("memory allocate error for body");
+    }
     f = fopen(file_path, "rb");
     if (access(file_path, F_OK) != 0) {
         printf("File do not exist\n");
@@ -150,7 +191,7 @@ int getProcessing(char **body, char *file_path) {
         fclose(f);
         return 403;
     } else {
-        fread(*body, 1, file_size, f);
+        fread(*response_body, 1, file_size, f);
         fclose(f);
         return 200;
     }
@@ -165,6 +206,7 @@ void savePostData(int sock, char *request_header, int recv_size){
     char *file_name;
 
     /* 読み取れていないデータがある場合、request_messageにデータを追加する */
+    
     char *content_length_pos = strstr(request_header, "Content-Length: ");
     char *boundary_pos = strstr(request_header, "Content-Type: multipart/form-data; boundary=");
     if (boundary_pos) {
@@ -172,17 +214,26 @@ void savePostData(int sock, char *request_header, int recv_size){
         char *boundary_value_last = strstr(boundary_pos,"\r\n\r\n");
         int boundary_len = boundary_value_last - boundary_value_first;
         boundary = malloc(boundary_len);
+    if (boundary == NULL){
+        printf("memory allocate error for boundary");
+    }
         sscanf(boundary_value_first, "%s", boundary);
     } else {
         printf("Cannot find boundary.\n");
     }
     char *content_length_str;
     content_length_str = malloc(boundary_pos - content_length_pos -2);
+    if (content_length_str == NULL){
+        printf("memory allocate error for content_length_str");
+    }
     strncpy(content_length_str, content_length_pos + strlen("Content-Length: "), boundary_pos - content_length_pos -2);
     int content_length = atoi(content_length_str);
     char *blank_line_pos = strstr(request_header, "\r\n\r\n");
     size_t header_length = blank_line_pos - request_header;
     request_message = malloc(content_length + header_length + strlen("\r\n\r\n") + 1);
+    if (request_message == NULL){
+        printf("memory allocate error for request_message");
+    }
 
     memcpy(request_message, request_header, recv_size);
     int recieve_more_content_length = 0;
@@ -204,9 +255,14 @@ void savePostData(int sock, char *request_header, int recv_size){
     size_t request_body_length = end_boundary_pos - delimiter_pos - strlen(delimiter) - 2;
     size_t file_name_length = request_content_type_pos - request_file_name_pos - strlen("filename=") - 2;
     file_name = malloc(file_name_length-2);
+    if (file_name == NULL){
+        printf("memory allocate error for file_name");
+    }
+
     strncpy(file_name, request_file_name_pos + strlen("filename=") + 1, file_name_length - 2); 
     file_name[file_name_length - 2] = '\0';
     request_body = delimiter_pos + strlen(delimiter);
+
     /* ここにfile nameを決める関数をかく */
     if (strstr(file_name, ".html") != NULL || strstr(file_name, ".css") != NULL || strstr(file_name, ".js") != NULL){
         FILE *file = fopen(file_name, "w");
@@ -249,6 +305,12 @@ int createResponseMessage(char **response_message, int status, char *header, cha
                     body_len = body_size;
                 }
             }
+            break;
+        case 301:
+            status_message = "301 Moved Permanently";
+            break;
+        case 302:
+            status_message = "302 Found";
             break;
         case 404:
             status_message = "404 Not Found";
@@ -310,9 +372,10 @@ void showMessage(char *message, unsigned int size) {
  * クライアント側からのリクエストを元にヘッダーフィールドを作成する関数
  * 
  */
-void setHeaderFiled(char **header_field, char *target, unsigned int file_size){
+void setHeaderFiled(char **header_field, char *target, unsigned int file_size, int status, char **location){
     
-    char* type = NULL;
+    char *type = NULL;
+    int required_size;
     struct ContentType {
         char *extension;
         char *mime_type;
@@ -326,19 +389,32 @@ void setHeaderFiled(char **header_field, char *target, unsigned int file_size){
     };
     size_t content_num = sizeof(content_types) / sizeof(content_types[0]);
 
-    for(size_t i = 0; i < content_num; i++) {
-        if(strstr(target, content_types[i].extension) != NULL) {
-            type = content_types[i].mime_type;
-            break;
+    if(status == 301 || status == 302){
+        required_size = snprintf(NULL, 0, "Location: %s\r\nContent-Length: 0\r\n", *location) + 1;
+        *header_field = malloc(required_size * sizeof(char));
+        if(*header_field == NULL) {
+            fprintf(stderr, "Failed to allocate memory.\n");
+            exit(EXIT_FAILURE);
         }
+        snprintf(*header_field, required_size, "Location: %s\r\nContent-Length: 0\r\n", *location);
+    } else {
+        for(size_t i = 0; i < content_num; i++) {
+            if(strstr(target, content_types[i].extension) != NULL) {
+                type = content_types[i].mime_type;
+                break;
+            }
+        }
+        if(type == NULL) {
+            type = "image/jpeg";
+        }
+        required_size = snprintf(NULL, 0, "Content-Type: %s\r\nContent-Length: %u\r\n", type, file_size) + 1;
+        *header_field = malloc(required_size * sizeof(char));
+        if(*header_field == NULL) {
+            fprintf(stderr, "Failed to allocate memory.\n");
+            exit(EXIT_FAILURE);
+        }
+        snprintf(*header_field, required_size, "Content-Type: %s\r\nContent-Length: %u\r\n", type, file_size);
     }
-    if(type == NULL) {
-        type = "image/jpeg";
-    }
-
-    int required_size = snprintf(NULL, 0, "Content-Type: %s\r\nContent-Length: %u\r\n", type, file_size) + 1;
-    *header_field = malloc(required_size * sizeof(char));
-    snprintf(*header_field, required_size, "Content-Type: %s\r\nContent-Length: %u\r\n", type, file_size);
 }
 
 /*
@@ -357,6 +433,7 @@ int httpServer(int sock, char *root_path) {
     char *response_body;
     int status;
     unsigned int file_size;
+    char *location;
     
     while (1) {
 
@@ -381,22 +458,23 @@ int httpServer(int sock, char *root_path) {
             break;
         }
         
-        /* メソッドがGETまたはPOSTまたはHEAD以外はステータスコードを404にする */
+        /* ターゲットやメソッドでステータスコードを決める */
         if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0 || strcmp(method, "HEAD") == 0) {
-            /* GETの応答をするために必要な処理を行う */
-            status = getProcessing(&response_body, &target[1]);
+            status = getStatus(&response_body, &target[1], &location);
         } else {
             status = 405;
         }
         
         /* POST通信時の受信ファイルを保存*/
         if (strcmp(method, "POST") == 0) {
+
             savePostData(sock, request_message, request_size);
+
         }
 
         /* ヘッダーフィールド作成*/
         file_size = getFileSize(&target[1]);
-        setHeaderFiled(&header_field, target, file_size);
+        setHeaderFiled(&header_field, target, file_size, status, &location);
 
         /* レスポンスメッセージを作成 */
         response_size = createResponseMessage(&response_message, status, header_field, response_body, file_size, method);
@@ -412,6 +490,7 @@ int httpServer(int sock, char *root_path) {
         sendResponseMessage(sock, response_message, response_size);
         
     }
+    free(location);
     free(method);
     free(target);
     free(header_field);
@@ -470,6 +549,8 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    entries = parseRedirectConfig("redirect.cnf");
+
     while (1) {
         /* 接続要求の受け付け（接続要求くるまで待ち） */
         printf("Waiting connect...\n");
@@ -483,6 +564,10 @@ int main(int argc, char *argv[]) {
 
         pthread_t thread;
         thread_args *args = malloc(sizeof(thread_args));
+        if(args == NULL) {
+            fprintf(stderr, "Failed to allocate memory.\n");
+            exit(EXIT_FAILURE);
+        }
         args->c_sock = c_sock;
         args->root_path = root_path;
         pthread_create(&thread, NULL, handle_request, (void *)args);
