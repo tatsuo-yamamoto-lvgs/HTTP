@@ -375,6 +375,7 @@ void showMessage(char *message, unsigned int size) {
 void setHeaderFiled(char **header_field, char *target, unsigned int file_size, int status, char **location){
     
     char *type = NULL;
+    char *cash_type;
     int required_size;
     struct ContentType {
         char *extension;
@@ -385,25 +386,29 @@ void setHeaderFiled(char **header_field, char *target, unsigned int file_size, i
         {"css", "text/css"},
         {"javascript", "text/javascript"},
         {"png", "image/png"},
-        {"jpeg", "image/jpeg"}
+        {"jpg", "image/jpg"}
     };
     size_t content_num = sizeof(content_types) / sizeof(content_types[0]);
-
-    if(status == 301 || status == 302){
-        required_size = snprintf(NULL, 0, "Location: %s\r\nContent-Length: 0\r\n", *location) + 1;
-        *header_field = malloc(required_size * sizeof(char));
-        if(*header_field == NULL) {
-            fprintf(stderr, "Failed to allocate memory.\n");
-            exit(EXIT_FAILURE);
-        }
-        snprintf(*header_field, required_size, "Location: %s\r\nContent-Length: 0\r\n", *location);
-    } else {
-        for(size_t i = 0; i < content_num; i++) {
+    for(size_t i = 0; i < content_num; i++) {
             if(strstr(target, content_types[i].extension) != NULL) {
                 type = content_types[i].mime_type;
                 break;
             }
         }
+    if(status == 301 || status == 302){
+        if(type == content_types[1].mime_type){
+            cash_type = "max-age=30";
+        } else {
+            cash_type = "no-store";
+        }
+        required_size = snprintf(NULL, 0, "Location: %s\r\nContent-Length: 0\r\nCache-Control: %s\r\n", *location, cash_type) + 1;
+        *header_field = malloc(required_size * sizeof(char));
+        if(*header_field == NULL) {
+            fprintf(stderr, "Failed to allocate memory.\n");
+            exit(EXIT_FAILURE);
+        }
+        snprintf(*header_field, required_size, "Location: %s\r\nContent-Length: 0\r\nCache-Control: %s\r\n", *location, cash_type);
+    } else {
         if(type == NULL) {
             type = "image/jpeg";
         }
@@ -450,7 +455,7 @@ int httpServer(int sock, char *root_path) {
         }
 
         /* 受信した文字列を表示 */
-        showMessage(request_message, request_size);
+        // showMessage(request_message, request_size);
         
         /* 受信した文字列を解析してメソッドやリクエストターゲットを取得 */
         if (parseRequestMessage(&method, &target, request_message, root_path, request_size) == -1) {
