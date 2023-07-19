@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <pthread.h>
 
-#define SIZE (5*1024)
+#define SIZE (10*1024)
 
 int httpServer(int, char*);
 int recvRequestMessage(int, char*, unsigned int);
@@ -18,13 +18,11 @@ int createResponseMessage(char**, int, char*, char*, unsigned int, char*);
 int sendResponseMessage(int, char*, unsigned int);
 unsigned int getFileSize(const char*);
 void setHeaderFiled(char**,char*,unsigned int, int, char**);
-void *handle_request(void*);
-
 typedef struct {
     int c_sock;
     char *root_path;
 } thread_args;
-
+void *handle_request(thread_args*);
 typedef struct {
     char file[256];
     char url[256];
@@ -49,7 +47,7 @@ RedirectEntry* parseRedirectConfig(const char* path) {
     return entries;
 }
 
-void *handle_request(void *arg) {
+void *handle_request(thread_args *arg) {
     thread_args *args = (thread_args *) arg;
 
     /* 接続済のソケットでデータのやり取り */
@@ -455,7 +453,7 @@ int httpServer(int sock, char *root_path) {
         }
 
         /* 受信した文字列を表示 */
-        // showMessage(request_message, request_size);
+        showMessage(request_message, request_size);
         
         /* 受信した文字列を解析してメソッドやリクエストターゲットを取得 */
         if (parseRequestMessage(&method, &target, request_message, root_path, request_size) == -1) {
@@ -557,27 +555,32 @@ int main(int argc, char *argv[]) {
     entries = parseRedirectConfig("redirect.cnf");
 
     while (1) {
-        /* 接続要求の受け付け（接続要求くるまで待ち） */
-        printf("Waiting connect...\n");
-        c_sock = accept(w_addr, NULL, NULL);
-        if (c_sock == -1) {
-            printf("accept error\n");
-            close(w_addr);
-            return -1;
-        }
-        printf("Connected!!\n");
-
-        pthread_t thread;
-        thread_args *args = malloc(sizeof(thread_args));
-        if(args == NULL) {
-            fprintf(stderr, "Failed to allocate memory.\n");
-            exit(EXIT_FAILURE);
-        }
-        args->c_sock = c_sock;
-        args->root_path = root_path;
-        pthread_create(&thread, NULL, handle_request, (void *)args);
+    /* 接続要求の受け付け（接続要求くるまで待ち） */
+    printf("Waiting connect...\n");
+    c_sock = accept(w_addr, NULL, NULL);
+    if (c_sock == -1) {
+        printf("accept error\n");
+        close(w_addr);
+        return -1;
     }
+    printf("Connected!!\n");
 
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("fork error\n");
+        close(w_addr);
+        return -1;
+    } else if (pid == 0) { 
+        close(w_addr); 
+        thread_args args;
+        args.c_sock = c_sock;
+        args.root_path = root_path;
+        handle_request(&args);
+        exit(EXIT_SUCCESS); 
+    } else { 
+        close(c_sock); 
+    }
+}
     /* 接続待ちソケットをクローズ */
     close(w_addr);
 
