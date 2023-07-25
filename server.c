@@ -6,21 +6,24 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define SIZE (10*1024)
 
-int httpServer(int, char*);
-int recvRequestMessage(int, char*, unsigned int);
+int httpServer(SSL*, char*);
+int recvRequestMessage(SSL*, char*, unsigned int);
 int parseRequestMessage(char**, char**, char*, char*, int);
 int getStatus(char**, char* ,char**);
-void savePostData(int,char*,int);
+void savePostData(SSL*,char*,int);
 int createResponseMessage(char**, int, char*, char*, unsigned int, char*);
-int sendResponseMessage(int, char*, unsigned int);
+int sendResponseMessage(SSL*, char*, unsigned int);
 unsigned int getFileSize(const char*);
 void setHeaderFiled(char**,char*,unsigned int, int, char**);
 typedef struct {
     int c_sock;
     char *root_path;
+    SSL_CTX *ctx;
 } thread_args;
 void *handle_request(thread_args*);
 typedef struct {
@@ -50,8 +53,21 @@ RedirectEntry* parseRedirectConfig(const char* path) {
 void *handle_request(thread_args *arg) {
     thread_args *args = (thread_args *) arg;
 
-    /* 接続済のソケットでデータのやり取り */
-    httpServer(args->c_sock, args->root_path);
+    /* SSL接続の作成 */
+    SSL *ssl = SSL_new(arg->ctx);
+    SSL_set_fd(ssl, args->c_sock);
+
+    /* SSLハンドシェイク */
+    if (SSL_accept(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+    } else {
+        /* SSL接続済のソケットでデータのやり取り */
+        httpServer(ssl, args->root_path);
+    }
+
+    /* SSL接続をシャットダウンと解放 */
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
 
     /* ソケット通信をクローズ */
     close(args->c_sock);
@@ -89,12 +105,12 @@ unsigned int getFileSize(const char *path) {
  * buf_size：そのバッファのサイズ
  * 戻り値：受信したデータサイズ（バイト長）
  */
-int recvRequestMessage(int sock, char *request_message, unsigned int buf_size) {
+int recvRequestMessage(SSL *ssl, char *request_message, unsigned int buf_size) {
     int recv_size;
     int total_recv_size = 0;
     
     while(1){
-        recv_size = recv(sock, request_message + total_recv_size, buf_size, 0);
+        recv_size = SSL_read(ssl, request_message + total_recv_size, buf_size);
         total_recv_size += recv_size;
         request_message[total_recv_size] = '\0';
         if (strstr(request_message, "\r\n\r\n")){
@@ -196,7 +212,7 @@ int getStatus(char **response_body, char *file_path, char **location) {
 }
 
 /* POST通信で送られてきたデータを保存する */
-void savePostData(int sock, char *request_header, int recv_size){
+void savePostData(SSL *sock, char *request_header, int recv_size){
     char *boundary;
     char *delimiter = "\r\n\r\n";
     char *request_message;
@@ -238,7 +254,7 @@ void savePostData(int sock, char *request_header, int recv_size){
     int re_recv_size;
     while(1){
         if (content_length + header_length + strlen("\r\n\r\n")> SIZE){
-            re_recv_size = recv(sock, request_message + recv_size + recieve_more_content_length, content_length + header_length + strlen("\r\n\r\n") - recv_size, 0);
+            re_recv_size = SSL_read(sock, request_message + recv_size + recieve_more_content_length, content_length + header_length + strlen("\r\n\r\n") - recv_size);
         }
         recieve_more_content_length += re_recv_size;
         if (recieve_more_content_length == content_length + header_length + strlen("\r\n\r\n") - recv_size){
@@ -344,11 +360,11 @@ int createResponseMessage(char **response_message, int status, char *header, cha
  * message_size：送信するメッセージのサイズ
  * 戻り値：送信したデータサイズ（バイト長）
  */
-int sendResponseMessage(int sock, char *response_message, unsigned int message_size) {
+int sendResponseMessage(SSL *ssl, char *response_message, unsigned int message_size) {
 
     int send_size;
     
-    send_size = send(sock, response_message, message_size, 0);
+    send_size = SSL_write(ssl, response_message, message_size);
 
     return send_size;
 }
@@ -425,7 +441,7 @@ void setHeaderFiled(char **header_field, char *target, unsigned int file_size, i
  * sock：接続済のソケット
  * 戻り値：0
  */
-int httpServer(int sock, char *root_path) {
+int httpServer(SSL *ssl, char *root_path) {
 
     int request_size, response_size;
     char request_message[SIZE];//固定長で良い。
@@ -441,7 +457,7 @@ int httpServer(int sock, char *root_path) {
     while (1) {
 
         /* リクエストメッセージを受信 */
-        request_size = recvRequestMessage(sock, request_message, SIZE);
+        request_size = recvRequestMessage(ssl, request_message, SIZE);
         if (request_size == -1) {
             printf("recvRequestMessage error\n");
             break;
@@ -471,7 +487,7 @@ int httpServer(int sock, char *root_path) {
         /* POST通信時の受信ファイルを保存*/
         if (strcmp(method, "POST") == 0) {
 
-            savePostData(sock, request_message, request_size);
+            savePostData(ssl, request_message, request_size);
 
         }
 
@@ -490,7 +506,7 @@ int httpServer(int sock, char *root_path) {
         showMessage(response_message, response_size);
 
         /* レスポンスメッセージを送信する */
-        sendResponseMessage(sock, response_message, response_size);
+        sendResponseMessage(ssl, response_message, response_size);
         
     }
     free(location);
@@ -520,6 +536,17 @@ int main(int argc, char *argv[]) {
     
     int w_addr, c_sock;
     struct sockaddr_in a_addr;
+
+    /* SSLのセットアップ */
+    SSL_library_init();
+    SSL_load_error_strings();
+
+    /* 必要なデータを構造体に持たせ、新しいコンテキストを作成 */
+    const SSL_METHOD *method = SSLv23_server_method();
+    SSL_CTX* ctx = SSL_CTX_new(method);
+
+    SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM);
+    SSL_CTX_use_PrivateKey_file(ctx, "private.key", SSL_FILETYPE_PEM);
 
     /* ソケットを作成 */
     w_addr = socket(AF_INET, SOCK_STREAM, 0);
@@ -575,6 +602,7 @@ int main(int argc, char *argv[]) {
         thread_args args;
         args.c_sock = c_sock;
         args.root_path = root_path;
+        args.ctx = ctx;
         handle_request(&args);
         exit(EXIT_SUCCESS); 
     } else { 
